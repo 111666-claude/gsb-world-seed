@@ -8,9 +8,9 @@ func TestCurrentVersionIsAccepted(t *testing.T) {
 	}
 }
 
-func TestValueIsPositiveForTypicalSeed(t *testing.T) {
+func TestChunkHashIsPositive(t *testing.T) {
 	hasher, _ := NewHasher(7, SeedVersion)
-	if hasher.Value(1, 2) == 0 {
+	if hasher.ChunkHash(0, 0) == 0 {
 		t.Fatal("派生值不该恒为 0")
 	}
 }
@@ -23,7 +23,7 @@ func TestChecksumOfEmptySet(t *testing.T) {
 }
 
 func TestConstants(t *testing.T) {
-	if SeedVersion != 3 {
-		t.Fatal("种子版本常量被改了")
+	if SeedVersion != 3 || ChunkSize != 16 {
+		t.Fatal("种子常量被改了")
 	}
 }
