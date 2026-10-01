@@ -1,6 +1,4 @@
 // Package worldseed 是分块世界种子：按分块坐标确定性派生、改一块只重算一块、版本迁移可逆、校验和去重。
-// 缺陷：把调用序号混进派生（同一坐标结果不同）、改一块就把整张缓存清掉（全图重算）、
-// 版本迁移没有实现、校验和把重复分块重复计入。
 package worldseed
 
 import "errors"
@@ -11,6 +9,12 @@ const (
 	ChunkSize   = 16
 )
 
+// 支持的种子版本范围：从 1 到当前版本的下一版，供相邻版本之间双向迁移。
+const (
+	minVersion = 1
+	maxVersion = SeedVersion + 1
+)
+
 // ErrSeedVersion 表示种子版本不受支持。
 var ErrSeedVersion = errors.New("worldseed: 不支持的种子版本")
 
@@ -19,35 +23,72 @@ type Hasher struct {
 	seed       uint64
 	version    int
 	cache      map[[2]int]uint64
-	calls      int
 	recomputed int
 }
 
-// NewHasher 建哈希器。缺陷：不校验版本，任何版本都接受。
+// NewHasher 建哈希器；版本超出支持范围时返回 ErrSeedVersion。
 func NewHasher(seed uint64, version int) (*Hasher, error) {
+	if version < minVersion || version > maxVersion {
+		return nil, ErrSeedVersion
+	}
 	return &Hasher{seed: seed, version: version, cache: map[[2]int]uint64{}}, nil
 }
 
-// ChunkHash 派生一个分块的值。缺陷：把调用序号混进结果（同一分块每次都不一样），也不写缓存。
+// derive 按坐标确定性派生：结果只由种子、版本与分块坐标决定，与调用顺序、调用次数无关。
+func (h *Hasher) derive(cx, cy int) uint64 {
+	value := h.seed*0x9E3779B97F4A7C15 + uint64(h.version)*0xC2B2AE3D27D4EB4F
+	value ^= uint64(cx) * 0xBF58476D1CE4E5B9
+	value ^= uint64(cy) * 0x94D049BB133111EB
+	value ^= value >> 30
+	value *= 0xBF58476D1CE4E5B9
+	value ^= value >> 27
+	value *= 0x94D049BB133111EB
+	value ^= value >> 31
+	return value
+}
+
+// ChunkHash 派生一个分块的值并缓存；缓存命中时直接返回，不产生重算。
 func (h *Hasher) ChunkHash(cx, cy int) uint64 {
-	h.calls++
+	key := [2]int{cx, cy}
+	if value, ok := h.cache[key]; ok {
+		return value
+	}
+	value := h.derive(cx, cy)
+	h.cache[key] = value
 	h.recomputed++
-	value := h.seed*31 + uint64(cx)*7 + uint64(cy)*13 + uint64(h.calls)
-	return value * 2654435761
+	return value
 }
 
-// Invalidate 让某个分块失效。缺陷：直接把整张缓存清掉（其他分块被迫全图重算）。
+// Invalidate 只让这一个分块失效：立即重算它自己（Recomputed 只增加 1）并写回缓存，
+// 其他分块的缓存原样保留，因此紧接着重算整批时只有它发生过这一次重算。
 func (h *Hasher) Invalidate(cx, cy int) {
-	h.cache = map[[2]int]uint64{}
+	h.cache[[2]int{cx, cy}] = h.derive(cx, cy)
+	h.recomputed++
 }
 
-// Migrate 迁移种子版本。缺陷：没有实现。
-func (h *Hasher) Migrate(version int) bool { return false }
+// Migrate 迁移到相邻版本（v-1 或 v+1），双向可逆：v → v+1 → v 后同一分块的值复原。
+// 目标版本不相邻或超出支持范围时返回 false，且当前版本保持不变。
+func (h *Hasher) Migrate(version int) bool {
+	if version < minVersion || version > maxVersion {
+		return false
+	}
+	if delta := version - h.version; delta != 1 && delta != -1 {
+		return false
+	}
+	h.version = version
+	h.cache = map[[2]int]uint64{}
+	return true
+}
 
-// Checksum 是一组分块的校验和。缺陷：重复分块会被重复计入。
+// Checksum 是一组分块的校验和：同一分块出现多次只算一次；用加法聚合，与分块顺序无关。
 func (h *Hasher) Checksum(cells [][2]int) uint64 {
+	seen := make(map[[2]int]struct{}, len(cells))
 	var sum uint64
 	for _, cell := range cells {
+		if _, ok := seen[cell]; ok {
+			continue
+		}
+		seen[cell] = struct{}{}
 		sum += h.ChunkHash(cell[0], cell[1])
 	}
 	return sum
